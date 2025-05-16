@@ -29,27 +29,33 @@ public class ShipAgent : Agent
     private NetworkStream stream;
     private TcpClient client;
     private float scaleFactor = 20f;
-    private float posLimit = 500f;
-    private float maxRudderAngle = 35f*Mathf.Deg2Rad;
+    private float posLimit = 1000f;
+    private float maxRudderAngle = 35f * Mathf.Deg2Rad;
     private float speedStandard = 10.0f;
 
-    private ScenarioManager scenarioManager;    
+    public float cpaSafeThreshold = 90f; 
 
-    
+    public float cpaThreshold = 20f;
+
+    private ScenarioManager scenarioManager;
+
+    private TargetShip targetShip;
+    private Transform targetShipTransform;
+
+
     void Start()
     {
         shipState = new ShipState();
         client = new TcpClient("localhost", portNumber);
         stream = client.GetStream();
         scenarioManager = FindObjectOfType<ScenarioManager>();
-        
     }
 
     public override void OnEpisodeBegin()
     {
         // Reset the position of the agent and target at the beginning of each episode
         this.shipState.position = Vector3.zero;
-        this.shipState.velocity = Vector3.zero;
+        this.shipState.velocity = Vector3.zero; // 0 아니게 수정 필요
         this.shipState.yaw = 0.0f;
         this.shipState.yawRate = 0.0f;
         this.shipState.rudderAngle = 0.0f;
@@ -58,45 +64,51 @@ public class ShipAgent : Agent
         this.transform.localPosition = Vector3.zero;
         this.transform.localRotation = Quaternion.Euler(0, 0, 0);
 
-        //Debug.Log("Episode Begin: " + this.transform.localPosition.ToString());
-
+        // initialize calculator
         string message = $"{50.0}";
         byte[] data = Encoding.ASCII.GetBytes(message + "\n");
         stream.Write(data, 0, data.Length);
 
-        // TODO: Randomize the target position
-        Goal.localPosition = new Vector3((Random.value-0.5f) * 100, 0.0f, Random.value * 50 + 100);
+        // initialize goal position
+        Goal.localPosition = new Vector3(9000f, 0.0f, 0.0f);
 
         // Scenario 적용
-        Scenario scenario = scenarioManager.GetNextScenario(); // 순차적 or 랜덤하게
+        Scenario scenario = scenarioManager.GetNextScenario();
         scenarioManager.SpawnScenario(scenario);
+        targetShip = scenarioManager.GetSpawnedShips()[0].GetComponent<TargetShip>();
+        targetShipTransform = scenarioManager.GetSpawnedShips()[0].transform;
     }
 
+    // collect observations
     public override void CollectObservations(VectorSensor sensor)
     {
-        Vector3 goalPosition = Quaternion.Inverse(this.transform.localRotation) * (Goal.localPosition - this.shipState.position);
 
-        sensor.AddObservation(goalPosition.z / posLimit);
-        sensor.AddObservation(goalPosition.x / posLimit);
-        // sensor.AddObservation(Goal.localPosition.z / posLimit);
-        // sensor.AddObservation(Goal.localPosition.x / posLimit);
-        // sensor.AddObservation(this.transform.localPosition.z / posLimit);
-        // sensor.AddObservation(this.transform.localPosition.x / posLimit);
+        // Goal의 상대 위치 (Local Frame)
+        Vector3 relativePosition = Quaternion.Inverse(this.transform.localRotation) *
+                                    (Goal.localPosition - this.transform.localPosition);
 
-        
-        sensor.AddObservation(this.shipState.velocity.z / speedStandard);
-        sensor.AddObservation(this.shipState.velocity.x / speedStandard);
+        // 1. Goal의 방위각 (선박 기준)
+        float bearingToGoal = Mathf.Atan2(relativePosition.x, relativePosition.z) / Mathf.PI;
+        sensor.AddObservation(bearingToGoal);
 
-        Vector3 worldVelocity = this.transform.localRotation*this.shipState.velocity;
-        float angleDiff = Vector3.Angle(worldVelocity, this.shipState.position - Goal.localPosition);
+        // 2. 선박 속도의 크기
+        float speedMagnitude = this.shipState.velocity.magnitude / speedStandard;
+        sensor.AddObservation(speedMagnitude);
 
-        sensor.AddObservation(angleDiff / 180f);
-        //sensor.AddObservation(this.shipState.yaw / Mathf.PI);
+        // 3. 선박 헤딩 (속도 방향)
+        float speedHeading = Mathf.Atan2(this.shipState.velocity.x, this.shipState.velocity.z) / Mathf.PI;
+        sensor.AddObservation(speedHeading);
+
+        // 4. 선회율
         sensor.AddObservation(this.shipState.yawRate / Mathf.PI);
+
+        // 5. 러더각
         sensor.AddObservation(this.shipState.rudderAngle / maxRudderAngle);
+
     }
 
 
+    // get action -> do action -> calculate reward
     public override void OnActionReceived(ActionBuffers actions)
     {
         // 1. 행동 값을 문자열로 전송 (예: rudder, engine force)
@@ -119,39 +131,64 @@ public class ShipAgent : Agent
         float heading = float.Parse(parts[5]);
         float rudder = float.Parse(parts[6]);
 
-        //4. 보상 계산
-        //distance 계산
-        float distanceToTargetCurrent = Vector3.Distance(this.transform.localPosition, Goal.localPosition);
-        float distanceToTargetNext = Vector3.Distance(new Vector3(y, 0, x), Goal.localPosition);
 
-        if(x > posLimit || x < -posLimit || y > posLimit || y < -posLimit)
+
+        //3. 보상 계산
+        // 1) 영역 초과 시 종료
+        if (x > posLimit || x < -posLimit || y > posLimit || y < -posLimit)
         {
             SetReward(-1.0f);
             EndEpisode();
+            return;
         }
 
-        if (distanceToTargetNext < 5f)
+        // 2) 목표 도달 시 종료
+        float cpa = CalculateCPA(new Vector3(y, 0, x), new Vector3(v, 0, u), targetShipTransform.localPosition, targetShip.GetVelocity());
+
+        // CPA가 안전 임계값(1해리) 이상이면 "충돌 위험 해소"로 간주하고 종료
+        if (cpa > cpaSafeThreshold)
         {
-            SetReward(1.0f);
+            SetReward(1.0f);  // 충돌 회피 성공 보상
             EndEpisode();
-        }else if(distanceToTargetNext > 20f){
-            Vector3 worldVelocityCurrent = this.transform.localRotation*this.shipState.velocity;
-            Vector3 worldVelocityNext = Quaternion.Euler(0, heading * Mathf.Rad2Deg, 0)*(new Vector3(v, 0, u));
-            float angleDiffCurrent = Vector3.Angle(worldVelocityCurrent, this.shipState.position - Goal.localPosition);
-            float angleDiffNext = Vector3.Angle(worldVelocityNext, new Vector3(y, 0, x) - Goal.localPosition);
-            float angleDiff = angleDiffCurrent - angleDiffNext;
-            SetReward(angleDiff/180*0.05f);    
-        }else{
-            SetReward(0.0f);
+            return;
+        }
+
+        if (cpa < 10f)
+        {
+            SetReward(-1.0f);
+            EndEpisode();
+            return;
+        }
+
+
+        // 3) 충돌 위험 평가
+        bool isHighRisk = IsHighCollisionRisk(cpa);
+
+        
+
+        if (isHighRisk)
+        {
+            // CPA가 커질수록 보상
+            AddReward((cpaThreshold - cpa) * 0.1f);
+        }
+        else
+        {
+            // 목표 접근 보상
+            float angleCurrent = AngleToGoal(this.shipState.velocity, Goal.localPosition - this.transform.localPosition);
+            float angleNext = AngleToGoal(new Vector3(v, 0, u), Goal.localPosition - new Vector3(y, 0, x));
+
+            float angleImprovement = angleCurrent - angleNext;
+            AddReward(Mathf.Clamp(angleImprovement * 0.01f, -0.05f, 0.05f));
+
+            // 드리프트 억제
+            AddReward(-0.1f * Mathf.Abs(v));
+
+            // COLREGs 준수 평가 및 보상
+            float colregsReward = EvaluateCOLREGsCompliance(targetShip.GetCategory(), rudder);
+            AddReward(colregsReward);
         }
         
-        
-        float distanceDiff = distanceToTargetCurrent - distanceToTargetNext;
-        AddReward(distanceDiff*0.01f);
-
-        AddReward(-0.1f*Mathf.Abs(v));
-        
-        // 3. Unity 위치에 적용
+        // 4. Unity 위치에 적용
         this.transform.localPosition = new Vector3(y, 0, x);
         this.transform.localRotation = Quaternion.Euler(0, heading * Mathf.Rad2Deg, 0);
 
@@ -161,5 +198,69 @@ public class ShipAgent : Agent
         this.shipState.yawRate = r;
         this.shipState.rudderAngle = rudder;
 
+
+
+    }
+    
+    private bool IsHighCollisionRisk(float cpa)
+    {
+        return cpa < cpaThreshold;
+    }
+
+    private float AngleToGoal(Vector3 velocity, Vector3 directionToGoal)
+    {
+        if (velocity.magnitude < 1e-5f)
+            return 180f; // 속도가 거의 없으면 최악의 방향 간주
+
+        return Vector3.Angle(velocity, directionToGoal);
+    }
+
+    private float CalculateCPA(Vector3 posA, Vector3 velA, Vector3 posB, Vector3 velB)
+    {
+        Vector3 r = posB - posA;
+        Vector3 v = velB - velA;
+        float vMag = v.magnitude;
+
+        if (vMag < 1e-5f)
+        {
+            return r.magnitude;  // 상대 속도가 거의 없으면 현재 거리 반환
+        }
+
+        float cpaDistance = Mathf.Abs(Vector3.Cross(r, v).magnitude / vMag);
+        return cpaDistance;
+    }
+
+    private float EvaluateCOLREGsCompliance(int category, float rudderAngle)
+    {
+        switch (category)
+        {
+            case 0: // CROSSING_GIVE_WAY
+                if (rudderAngle > 0)
+                    return 0.1f * rudderAngle;
+                else
+                    return -0.1f * rudderAngle; // 위반
+            case 1: // CROSSING_STAND_ON
+                if (Mathf.Abs(rudderAngle) > Mathf.Deg2Rad * 1)
+                    return -0.1f * rudderAngle; // 위반
+                else
+                    return 0.1f;
+            case 2: // OVERTAKING
+                if (rudderAngle > 0)
+                    return 0.1f * rudderAngle;
+                else
+                    return -0.1f * rudderAngle; // 위반
+            case 3: // OVERTAKEN
+                if (Mathf.Abs(rudderAngle) > Mathf.Deg2Rad * 1)
+                    return -0.1f * rudderAngle; // 위반
+                else
+                    return 0.1f;
+            case 4: // HEAD_ON
+                if (rudderAngle > 0)
+                    return 0.1f * rudderAngle;
+                else
+                    return -0.1f * rudderAngle; // 위반
+            default:
+                return 0f; // 기본 보상
+        }
     }
 }
