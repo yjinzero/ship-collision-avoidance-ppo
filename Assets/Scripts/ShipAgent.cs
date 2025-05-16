@@ -28,12 +28,12 @@ public class ShipAgent : Agent
 
     private NetworkStream stream;
     private TcpClient client;
-    private float scaleFactor = 10f;
+    private float scaleFactor = 20f;
     private float posLimit = 500f;
     private float maxRudderAngle = 35f*Mathf.Deg2Rad;
     private float speedStandard = 10.0f;
 
-    
+    private ScenarioManager scenarioManager;    
 
     
     void Start()
@@ -41,6 +41,7 @@ public class ShipAgent : Agent
         shipState = new ShipState();
         client = new TcpClient("localhost", portNumber);
         stream = client.GetStream();
+        scenarioManager = FindObjectOfType<ScenarioManager>();
         
     }
 
@@ -65,6 +66,10 @@ public class ShipAgent : Agent
 
         // TODO: Randomize the target position
         Goal.localPosition = new Vector3((Random.value-0.5f) * 100, 0.0f, Random.value * 50 + 100);
+
+        // Scenario 적용
+        Scenario scenario = scenarioManager.GetNextScenario(); // 순차적 or 랜덤하게
+        scenarioManager.SpawnScenario(scenario);
     }
 
     public override void CollectObservations(VectorSensor sensor)
