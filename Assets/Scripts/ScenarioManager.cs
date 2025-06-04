@@ -1,36 +1,31 @@
 using System.Collections.Generic;
 using UnityEngine;
-using System.Net.Sockets;
-using System.Text;
+using Unity.MLAgents;
+
 
 [System.Serializable]
-public class TargetShipConfig
+public class AgentConfig
 {
-    public float posRadius;
-    public float posAngle;
+    public float x;
+    public float y;
     public float yaw;
-    public float yawRate;
-    public float speed;
-    public int category;
-}
+} 
 
 [System.Serializable]
 public class Scenario
 {
-    public List<TargetShipConfig> targetShips;
+    public List<AgentConfig> agents = new List<AgentConfig>();
 }
 
 public class ScenarioManager : MonoBehaviour
 {
-
-    public GameObject targetShipPrefab;
-
-
-    private List<GameObject> spawnedShips = new List<GameObject>();
-
-    private float nauticalMile = 1852f; // 1 nautical mile in meters
-    private float knot = 0.514444f; // 1 knot in m/s
-    private float speedStandard = 12.0f;
+    public List<ShipAgent> allAgents;  // 미리 연결
+    private List<bool> endedEpisodes;  // 에이전트별 에피소드 종료 여부
+    private List<bool> startedEpisodes;  // 에이전트별 에피소드 시작 여부
+    public List<Scenario> predefinedScenarios;  // 시나리오 직접 작성
+    private Scenario currentScenario;
+    //private SimpleMultiAgentGroup agentGroup;
+    bool newScenario = false;
 
     private enum ShipCategory
     {
@@ -42,122 +37,107 @@ public class ScenarioManager : MonoBehaviour
         SAFE_ENCOUNTER
     }
 
-    List<int> riskyCategories = new List<int>
+    void Start()
     {
-        (int)ShipCategory.CROSSING_GIVE_WAY,
-        (int)ShipCategory.CROSSING_STAND_ON,
-        (int)ShipCategory.OVERTAKING,
-        (int)ShipCategory.OVERTAKEN,
-        (int)ShipCategory.HEAD_ON
-    };
+        if (predefinedScenarios.Count == 0)
+        {
+            Debug.LogError("No predefined scenarios available!");
+            return;
+        }
 
-    public List<GameObject> GetSpawnedShips()
+        SetNewScenario();  // 초기 시나리오 설정
+        SetActiveAgent();  // 활성 에이전트 설정
+    }
+
+    public void SetNewScenario()
     {
-        return spawnedShips;
+        // 새로운 시나리오 선택
+        int randomIndex = Random.Range(0, predefinedScenarios.Count);
+        currentScenario = predefinedScenarios[randomIndex];
+        endedEpisodes = new List<bool>(new bool[currentScenario.agents.Count]);
+        startedEpisodes = new List<bool>(new bool[currentScenario.agents.Count]);
+        Debug.Log($"New scenario set: {randomIndex} with {currentScenario.agents.Count} agents.");
+
+    }
+
+    public void SetActiveAgent()
+    {
+        for (int i = 0; i < allAgents.Count; i++)
+        {
+            if (i < currentScenario.agents.Count)
+            {
+                allAgents[i].gameObject.SetActive(true);
+            }
+            else
+            {
+                allAgents[i].gameObject.SetActive(false);
+            }
+        }
     }
 
 
-    public Scenario GetNextScenario()
+    public Scenario GetCurrentScenario()
     {
-        int randomCategory = riskyCategories[Random.Range(0, riskyCategories.Count)];
-        TargetShipConfig shipConfig = CreateConfigByCategory(randomCategory);
-
-        Scenario scenario = new Scenario();
-        scenario.targetShips = new List<TargetShipConfig>();
-        scenario.targetShips.Add(shipConfig);
-
-        return scenario;
+        return currentScenario;
     }
 
-    public void SpawnScenario(Scenario scenario)
+    public AgentConfig GetAgentConfig(int agentId)
     {
-        ClearScenario();
-
-        foreach (var shipConfig in scenario.targetShips)
-        {
-            Vector3 shipPosition = new Vector3(shipConfig.posRadius * Mathf.Sin(shipConfig.posAngle * Mathf.Deg2Rad), 0, shipConfig.posRadius * Mathf.Cos(shipConfig.posAngle * Mathf.Deg2Rad));
-            Quaternion shipRotation = Quaternion.Euler(0, shipConfig.yaw, 0);
-            GameObject ship = Instantiate(targetShipPrefab, shipPosition, shipRotation);
-            ship.GetComponent<TargetShip>().Initialize(shipConfig.speed, shipConfig.yawRate, shipConfig.category);
-            spawnedShips.Add(ship);
-        }
-    }
-
-    public void ClearScenario()
-    {
-        foreach (var obj in spawnedShips)
-        {
-            Destroy(obj);
-        }
-        spawnedShips.Clear();
-    }
-
-    TargetShipConfig CreateConfigByCategory(int category)
-    {
-        TargetShipConfig config = new TargetShipConfig();
-        config.posRadius = Random.Range(0.8f, 1.0f) * 50f;
-
-        switch ((ShipCategory)category)
-        {
-            case ShipCategory.CROSSING_GIVE_WAY:
-                config.posAngle = Random.Range(-6f, 112.5f);
-                if (config.posAngle < 6f) { config.yaw = Random.Range(-174f, -67.5f); }
-                else if (config.posAngle < 90f) { config.yaw = Random.Range(-180f, 0f); }
-                else { config.yaw = Random.Range(-67.5f, 0f); }
-                break;
-            case ShipCategory.CROSSING_STAND_ON:
-                config.posAngle = Random.Range(-112.5f, 6f);
-                if (config.posAngle > -6f) { config.yaw = Random.Range(67.5f, 174f); }
-                else if (config.posAngle > -90f) { config.yaw = Random.Range(0f, 180f); }
-                else { config.yaw = Random.Range(0f, 67.5f); }
-                break;
-            case ShipCategory.OVERTAKING:
-                config.posAngle = Random.Range(-6f, 6f);
-                config.yaw = Random.Range(-67.5f, 67.5f);
-                break;
-            case ShipCategory.OVERTAKEN:
-                config.posAngle = Random.Range(112.5f, 247.5f);
-                config.yaw = Random.Range(-67.5f, 67.5f);
-                break;
-            case ShipCategory.HEAD_ON:
-                config.posAngle = Random.Range(-6f, 6f);
-                config.yaw = Random.Range(-6f, 6f);
-                break;
-        }
-
-        config.category = category;
-        config.yawRate = yawRateByCatergory(category);
-        if (category == (int)ShipCategory.OVERTAKEN)
-        {
-            config.speed = speedStandard * 1.5f * knot / 20.0f;
-        }
-        else if (category == (int)ShipCategory.OVERTAKING)
-        {
-            config.speed = speedStandard * 0.5f * knot / 20.0f;
-        }
-        else
-        {
-            config.speed = speedStandard * knot / 20.0f;
-        }
-        
-
-        return config;
+        if (currentScenario == null || agentId >= currentScenario.agents.Count)
+            return null;
+        if (startedEpisodes[agentId] == true) return null;
+        else startedEpisodes[agentId] = true;
+        return currentScenario.agents[agentId];
     }
     
-    private float yawRateByCatergory(int category)
+    public void EndScenarioForAgent(ShipAgent agent)
     {
-        switch (category)
+        endedEpisodes[agent.agentId] = true;
+        agent.gameObject.SetActive(false);
+
+        if (endedEpisodes.TrueForAll(x => x))
         {
-            case (int)ShipCategory.CROSSING_STAND_ON:
-                return Random.Range(0.0f, 0.5f);
-            case (int)ShipCategory.OVERTAKEN:
-                return Random.Range(0.0f, 1.0f);
-            case (int)ShipCategory.HEAD_ON:
-                return Random.Range(0.0f, 1.0f);
-            case (int)ShipCategory.SAFE_ENCOUNTER:
-                return Random.Range(-10.0f, 10.0f);
-            default:
-                return 0f;
+            for(int i = 0; i < endedEpisodes.Count; i++)
+            {
+                allAgents[i].gameObject.SetActive(true);
+            }
+            EndScenarioForAllAgents();
+        }
+        
+    }
+
+    public void EndScenarioForAllAgents()
+    {
+        SetNewScenario();
+
+        for (int i = 0; i < allAgents.Count; i++)
+        {
+            ShipAgent agent = allAgents[i];
+            if (agent.gameObject.activeSelf)
+            {
+                Debug.Log($"Ending episode for agent {agent.agentId}, steps: {agent.StepCount}");
+                agent.EndEpisode();
+            }
+            if (i >= currentScenario.agents.Count) agent.gameObject.SetActive(false);
+            else agent.gameObject.SetActive(true);
+
         }
     }
+  
+    public List<(Vector3 position, Vector3 velocity, float yaw)> GetAgentStates(ShipAgent requestingAgent)
+    {
+        List<(Vector3, Vector3, float)> agentStates = new List<(Vector3, Vector3, float)>();
+        for(int i = 0; i < currentScenario.agents.Count; i++)
+        {
+            
+            ShipAgent agent = allAgents[i];
+            if (agent != requestingAgent)
+            {
+                agentStates.Add((agent.transform.localPosition, agent.GetVelocity(), agent.shipState.yaw));
+            }
+        }
+        return agentStates;
+    }
+    
+
 }
